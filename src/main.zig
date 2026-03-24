@@ -262,6 +262,8 @@ const WlrSurface = struct {
     /// The viewport associated with the wl_surface. This is used to scale the surface back to
     /// native size in a fractionally-scaled output.
     viewport: ?*wp.Viewport,
+    /// Whether the viewport has been configured.
+    viewport_set: bool = false,
 
     // --- wlroots Layer Shell ---
     /// The wlroots surface.
@@ -321,17 +323,7 @@ const WlrSurface = struct {
         self.wlr_surface.setExclusiveZone(-1);
         self.wlr_surface.setSize(self.destination_width, self.destination_height);
 
-        // NOTE: When the wp_fractional_scale_manager_v1 protocol is active, the
-        //       application is responsible for rendering at the exact physical
-        //       pixel size, and the Wayland surface buffer scale should be set
-        //       to 1. We were previously always using the output scale here,
-        //       which caused "source rectangle extends outside of the content
-        //       area" errors on scaled outputs.
-        if (fractional_scale_manager != null) {
-            self.wl_surface.setBufferScale(1);
-        } else {
-            self.wl_surface.setBufferScale(@intCast(self.scale));
-        }
+        self.wl_surface.setBufferScale(1);
 
         // TODO: Make the user set this.
         self.wlr_surface.setAnchor(.{ .top = true, .left = true });
@@ -407,11 +399,17 @@ const WlrSurface = struct {
             expected_height = resolution.height;
         }
 
-        var expected_destination_width = self.output.width;
-        var expected_destination_height = self.output.height;
-        if (self.fractional_scale) |scale| {
-            expected_destination_width = scale.scaleSize(expected_destination_width);
-            expected_destination_height = scale.scaleSize(expected_destination_height);
+        const expected_destination_width = self.output.width;
+        const expected_destination_height = self.output.height;
+
+        // Set viewport if size mismatch
+        if (self.viewport) |viewport| {
+            if (!self.viewport_set and (self.width != expected_destination_width or self.height != expected_destination_height)) {
+                viewport.setSource(.fromInt(0), .fromInt(0), .fromInt(@intCast(self.width)), .fromInt(@intCast(self.height)));
+                viewport.setDestination(@intCast(expected_destination_width), @intCast(expected_destination_height));
+                std.log.debug("Setting viewport in synchronize: buffer {}x{} to {}x{}", .{ self.width, self.height, expected_destination_width, expected_destination_height });
+                self.viewport_set = true;
+            }
         }
 
         const width_changed = expected_width != self.width;
@@ -419,6 +417,10 @@ const WlrSurface = struct {
         const scale_changed = self.output.scale != self.scale;
         const destination_width_changed = expected_destination_width != self.destination_width;
         const destination_height_changed = expected_destination_height != self.destination_height;
+
+        if (destination_width_changed or destination_height_changed) {
+            self.viewport_set = false;
+        }
 
         if (!width_changed and !height_changed and !scale_changed and !destination_width_changed and !destination_height_changed) {
             // No changes to apply.
@@ -431,21 +433,16 @@ const WlrSurface = struct {
         self.destination_width = expected_destination_width;
         self.destination_height = expected_destination_height;
 
-        // NOTE: See comment in `createEgl` about fractional scale handling.
-        if (self.fractional_scale != null) {
-            self.wl_surface.setBufferScale(1);
-        } else {
-            self.wl_surface.setBufferScale(@intCast(self.scale));
-        }
+        self.wl_surface.setBufferScale(1);
 
         self.wlr_surface.setSize(self.destination_width, self.destination_height);
         self.wl_egl_window.resize(@intCast(self.width), @intCast(self.height), 0, 0);
         std.log.debug("Surface resized to ({}, {}) with scale {}", .{ self.width, self.height, self.scale });
 
         if (self.viewport) |viewport| {
+            std.log.info("Setting viewport: buffer {}x{} to surface {}x{}", .{ self.width, self.height, self.destination_width, self.destination_height });
             viewport.setSource(.fromInt(0), .fromInt(0), .fromInt(@intCast(self.width)), .fromInt(@intCast(self.height)));
             viewport.setDestination(@intCast(self.destination_width), @intCast(self.destination_height));
-            std.log.debug("Viewport set to source: ({}, {}, {}, {}), destination: ({}, {})", .{ 0, 0, self.width, self.height, self.destination_width, self.destination_height });
         }
 
         self.wl_surface.commit();
@@ -577,6 +574,7 @@ const FractionalScale = struct {
             .preferred_scale => |preferred_scale| {
                 self.preferred_scale = preferred_scale.scale;
                 self.ready = true;
+                std.log.info("Fractional scale set to {}, ready: {}", .{ self.preferred_scale, self.ready });
             },
         }
     }
